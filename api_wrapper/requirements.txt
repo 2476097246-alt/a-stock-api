@@ -1,0 +1,14 @@
+# a-stock-data API Wrapper — 精准锁版依赖
+# 部署目标: 阿里云 FC3 custom.debian10 (Linux x86_64, Python 3.7)
+#
+# 注意:
+# - 所有依赖将在 FC 容器内通过阿里云内网镜像在线安装
+# - 禁止在 Windows 本地执行 pip install -t . 打包
+# - flask 锁定 2.2.x (Python 3.7 兼容上限; 2.3+/3.0+ 需 Python >=3.8)
+# - mootdx 锁定 0.11.7，防止版本解析漂移导致 412 启动失败
+flask~=2.2.0
+requests
+pandas
+stockstats
+mootdx==0.11.7
+gunicorn

@@ -1,0 +1,190 @@
+﻿openapi: "3.0.3"
+info:
+  title: "A-stock-data API Wrapper"
+  version: "1.0.0"
+  description: >
+    A 股股票数据 HTTP API，专为大模型 Function Calling / Tool Use 设计。
+    提供龙虎榜、概念板块归属、资金流向三大核心数据查询。
+
+    数据源：
+    - 龙虎榜：直连东财 datacenter API
+    - 概念板块：直连百度股市通 PAE API
+    - 资金流向：直连东财 push2 / push2his API
+
+    限流须知：东财系接口有频率限制（大于5次/秒、并发大于等于10、大于100次/分钟均可能封IP）。
+    本 API 已内置串行节流（最小间隔1秒+随机抖动），大模型批量调用时仍需注意间隔。
+
+    通用返回格式：
+    {"status": "success", "data": {...}}
+    {"status": "error", "data": null, "message": "..."}
+servers:
+  - url: https://api-wrapper-oapgqjhnbs.cn-hangzhou.fcapp.run
+    description: 阿里云 FC 生产环境
+tags:
+  - name: LongHuBang
+    description: 龙虎榜上榜记录、买卖席位、全市场排名
+  - name: Concept
+    description: 个股所属行业/概念/地域分类
+  - name: FundFlow
+    description: 个股主力资金净流入流出
+paths:
+  /api/v1/stock/dragon_tiger:
+    get:
+      tags: [LongHuBang]
+      operationId: queryDragonTiger
+      summary: 查询龙虎榜数据
+      description: |
+        查询龙虎榜数据，支持两种模式：
+
+        【个股席位详情 scope=single，默认】
+        查询指定股票在指定日期区间内的龙虎榜上榜记录：
+        - 每次上榜日期、上榜原因、净买入金额（万元）、换手率
+        - 最近一次上榜的买入/卖出席位 TOP5（营业部名称及买卖金额）
+        - 机构专用席位买卖汇总（机构动向分析）
+
+        【全市场龙虎榜 scope=all】
+        查询指定日期所有触发龙虎榜的股票，按净买入降序排列。
+        适合快速了解当日市场热钱动向。
+
+        大模型使用建议：
+        - 用户问某股票上过龙虎榜吗：用 scope=single
+        - 用户问今天龙虎榜哪些股票净买入最多：用 scope=all
+        - 用户问最近机构在买什么：用 scope=all + min_net_buy 过滤大额净买入
+        - ST 股涨跌停 5%，比科创板 20% 更容易触发龙虎榜
+      parameters:
+        - name: code
+          in: query
+          required: false
+          description: 6位股票代码如 002475。scope=single时必填，scope=all时忽略
+          schema:
+            type: string
+            pattern: "^[0-9]{6}$"
+            example: "002475"
+        - name: trade_date
+          in: query
+          required: false
+          description: 查询日期 YYYY-MM-DD。不传默认今天。非交易日或盘后未更新时返回空
+          schema:
+            type: string
+            format: date
+            example: "2026-05-17"
+        - name: scope
+          in: query
+          required: false
+          description: 查询范围。single=个股席位详情(默认)，all=全市场龙虎榜
+          schema:
+            type: string
+            enum: [single, all]
+            default: single
+        - name: look_back
+          in: query
+          required: false
+          description: 回看天数，仅scope=single有效。默认30天
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+        - name: min_net_buy
+          in: query
+          required: false
+          description: 净买入下限(万元)，仅scope=all有效。如5000表示只看超5000万的股票
+          schema:
+            type: number
+            example: 5000
+      responses:
+        "200":
+          description: 成功返回龙虎榜数据
+        "500":
+          description: 查询失败
+
+  /api/v1/stock/concept:
+    get:
+      tags: [Concept]
+      operationId: queryConcept
+      summary: 查询概念板块归属
+      description: |
+        查询个股所属的行业、概念、地域分类（百度股市通）。
+
+        返回字段：
+        - industry：行业分类（申万一级/二级），含名称和涨跌幅
+        - concept：概念板块归属数组，含概念名称和涨跌幅
+        - region：地域分类（如广东、长三角等）
+        - concept_tags：纯概念名称数组，方便大模型直接消费
+
+        大模型使用建议：
+        - 用户问这只股票属于什么板块/概念：调用本接口，用concept_tags回答
+        - 用户问最近什么概念在涨：结合concept的change_pct字段判断
+        - 用户问有哪些股票和这只同一概念：拿到concept_tags后可用iwencai语义搜索
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: 6位股票代码，如688017（绿的谐波）、000858（五粮液）
+          schema:
+            type: string
+            pattern: "^[0-9]{6}$"
+            example: "688017"
+      responses:
+        "200":
+          description: 成功返回概念板块数据
+        "500":
+          description: 查询失败
+
+  /api/v1/stock/fund_flow:
+    get:
+      tags: [FundFlow]
+      operationId: queryFundFlow
+      summary: 查询个股资金流向
+      description: |
+        查询个股主力资金净流入流出，支持两种时间粒度：
+
+        【分钟级 period=minute，默认】
+        返回当日盘中逐分钟资金流向：
+        - main_net：主力净流入（超大单+大单合计）
+        - super_net：超大单净流入（大于等于100万元）
+        - large_net：大单净流入（20万到100万）
+        - mid_net：中单净流入（4万到20万）
+        - small_net：小单净流入（小于4万）
+        金额单位均为元（非万元），展示时需换算。
+
+        【日级120日 period=120d】
+        返回最近120个交易日每日资金流向汇总。适合分析中长期资金趋势。
+
+        大模型使用建议：
+        - 用户问现在主力在流入还是流出：用period=minute，看最新main_net正负
+        - 用户问最近主力动向：用period=120d，统计近20日累计净流入
+        - 用户问有没有主力吸筹信号：用period=120d，检查小单持续流出+大单持续流入
+        - 金额单位是元，向用户展示时必须换算为万元或亿元
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: 6位股票代码，如000858（五粮液）、600519（贵州茅台）
+          schema:
+            type: string
+            pattern: "^[0-9]{6}$"
+            example: "000858"
+        - name: period
+          in: query
+          required: false
+          description: 数据粒度。minute=分钟级(默认)，120d=日级最近120交易日
+          schema:
+            type: string
+            enum: [minute, "120d"]
+            default: minute
+      responses:
+        "200":
+          description: 成功返回资金流向数据
+        "500":
+          description: 查询失败
+
+  /api/v1/health:
+    get:
+      tags: [System]
+      operationId: healthCheck
+      summary: 健康检查
+      description: 检查 API 服务是否正常运行
+      responses:
+        "200":
+          description: 服务正常

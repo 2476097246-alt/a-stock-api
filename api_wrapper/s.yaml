@@ -1,0 +1,25 @@
+edition: 3.0.0
+name: a-stock-api
+access: default
+resources:
+  api-wrapper:
+    component: fc3
+    props:
+      region: cn-hangzhou
+      functionName: a-stock-api-v3  # 🚀 换成 v3 名字，彻底告别历史包袱
+      runtime: custom.debian11  # Debian 11 → Python 3.9
+      code: ./
+      memorySize: 1024
+      timeout: 120
+      customRuntimeConfig:          # 🚀 custom 环境必须的启动指令
+        command:
+          - bash
+          - bootstrap
+      environmentVariables:
+        PORT: "9000"
+      triggers:
+        - triggerName: http-trigger
+          triggerType: http
+          triggerConfig:
+            authType: anonymous
+            methods: [GET, POST, OPTIONS]
