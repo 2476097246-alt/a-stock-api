@@ -1,177 +1,165 @@
-﻿# a-stock-data API Wrapper — 阿里云函数计算 部署指南
+﻿# a-stock-data API Wrapper — 部署指南
 
-## 概述
+## 方案 A：阿里云 ECS 部署（推荐，无额度限制）
 
-本目录包含将 A 股数据 API 部署到阿里云函数计算（FC）的全部配置。
-部署后，DeepSeek 等大模型可通过 HTTP 调用龙虎榜、概念板块、资金流向三个核心数据接口。
+### 前提
+- 阿里云 ECS 一台（CentOS 7/8 或 Ubuntu 20.04/22.04，1C2G 足够）
+- 安全组已放行 9000 端口（或你要用的端口）
+- 本机可通过 SSH 连接 ECS
 
----
-
-## 文件清单
-
-```
-api_wrapper/
-├── app.py            # Flask 应用（3个GET路由 + 健康检查）
-├── stock_core.py     # 核心抓取模块（6个函数，从SKILL.md提取）
-├── requirements.txt  # Python 依赖
-├── openapi.yaml      # OpenAPI 3.0 接口文档（给大模型读的工具说明书）
-├── s.yaml            # Serverless Devs 部署配置
-├── bootstrap         # FC 自定义运行时启动脚本
-├── .fcignore         # 部署忽略文件清单
-└── DEPLOY.md         # 本文件
-```
-
----
-
-## 前置准备
-
-### 1. 安装 Serverless Devs
+### 1. 连接 ECS
 
 ```bash
-npm install -g @serverless-devs/s
+ssh root@<你的ECS公网IP>
 ```
 
-### 2. 配置阿里云账号
+### 2. 安装 Python 3（如果没有）
+
+**Ubuntu/Debian：**
+```bash
+apt update && apt install -y python3 python3-pip
+```
+
+**CentOS：**
+```bash
+yum install -y python3 python3-pip
+```
+
+### 3. 克隆仓库
 
 ```bash
-s config add \
-  --AccountID <你的阿里云AccountID> \
-  --AccessKeyID <你的AccessKey ID> \
-  --AccessKeySecret <你的AccessKey Secret>
+cd /opt
+git clone https://github.com/2476097246-alt/a-stock-api.git
+cd a-stock-api/api_wrapper
 ```
 
-> 建议使用 RAM 子账号，最小权限：AliyunFCFullAccess + AliyunOSSFullAccess
+> 如果 GitHub 连不上（国内 ECS 常见），先在本地 `git clone` 然后用 `scp` 传上去：
+> ```bash
+> # 在本地执行
+> scp -r api_wrapper root@<IP>:/opt/a-stock-api/
+> ```
 
-### 3. 给 bootstrap 添加执行权限（macOS/Linux）
+### 4. 安装依赖
 
 ```bash
-chmod +x api_wrapper/bootstrap
+cd /opt/a-stock-api/api_wrapper
+pip3 install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 ```
 
-> Windows 用户跳过此步，FC 运行环境是 Linux，部署时会自动处理
-
----
-
-## 部署（三种方案）
-
-### 方案一：Serverless Devs 一键部署（推荐）
+### 5. 快速启动（前台测试）
 
 ```bash
-cd api_wrapper
-s deploy
+export PORT=9000
+python3 app.py
 ```
 
-部署成功后，终端会输出公网访问 URL，格式类似：
-```
-https://<id>.<region>.fc.aliyuncs.com
-```
-
-测试：
+另开一个终端测试：
 ```bash
-curl https://<你的域名>/api/v1/health
-curl "https://<你的域名>/api/v1/stock/concept?code=688017"
+curl http://localhost:9000/api/v1/health
+# 应返回 {"status":"success","data":{"message":"a-stock-data API Wrapper is running"...}}
 ```
 
-### 方案二：阿里云 FC 控制台手动部署
+### 6. 生产级部署（gunicorn + systemd 保活）
 
-1. 将 `api_wrapper/` 内容打包为 zip（不含 s.yaml 和 .fcignore）
-2. 登录 [FC 控制台](https://fc.console.aliyun.com)
-3. 创建函数 → 选择「自定义运行时」→ runtime 选 `custom.debian10`
-4. 上传 zip 包
-5. 启动命令填：`./bootstrap`
-6. 环境变量加：`PORT=9000`
-7. 创建 HTTP 触发器 → 认证方式选「无需认证」
-
-### 方案三：自定义容器（Docker）
-
-创建 `Dockerfile`：
-```dockerfile
-FROM python:3.10-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-EXPOSE 9000
-CMD ["python", "app.py"]
-```
-
-构建并推送到阿里云容器镜像服务：
+创建 systemd 服务文件：
 ```bash
-docker build -t registry.cn-hangzhou.aliyuncs.com/<namespace>/a-stock-api:latest .
-docker push registry.cn-hangzhou.aliyuncs.com/<namespace>/a-stock-api:latest
+cat > /etc/systemd/system/a-stock-api.service << 'EOF'
+[Unit]
+Description=A-Stock Data API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/a-stock-api/api_wrapper
+Environment=PORT=9000
+ExecStart=/usr/bin/python3 -m gunicorn -w 4 -b 0.0.0.0:9000 app:app --timeout 60 --access-logfile /var/log/a-stock-api.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable a-stock-api
+systemctl start a-stock-api
 ```
 
-然后在 FC 控制台创建函数时选择「使用容器镜像」。
-
----
-
-## 配置调整
-
-### 内存和超时
-
-编辑 `s.yaml` 中的 `vars` 区块：
-```yaml
-vars:
-  memorySize: 512    # MB，东财接口有时响应慢可以调到 1024
-  timeout: 60        # 秒，120日资金流数据量大可以调到 120
+检查状态：
+```bash
+systemctl status a-stock-api
+curl http://localhost:9000/api/v1/health
 ```
 
-### 实例并发
+### 7. （可选）Nginx 反向代理 + 域名 + HTTPS
 
-`instanceConcurrency: 10` 表示每个实例最多同时处理 10 个请求。
-注意：东财接口有内置串行节流，建议并发不要太高。
+```bash
+apt install -y nginx certbot python3-certbot-nginx
+```
 
-### 自定义域名
+Nginx 配置 `/etc/nginx/sites-available/a-stock-api`：
+```nginx
+server {
+    listen 80;
+    server_name api.yourdomain.com;
 
-1. 在 FC 控制台 → 域名管理 → 添加自定义域名
-2. 绑定你的域名并配置 SSL 证书
-3. 将 DeepSeek 的 API 工具 URL 指向自定义域名
-
----
-
-## 限流与成本
-
-### 东财防封
-
-东财接口有频率限制，本 API 已内置 `em_get()` 串行节流：
-- 最小间隔 1 秒 + 随机抖动 0.1~0.5 秒
-- 会话 Keep-Alive 复用
-- **批量并发调用建议限制在 5 QPS 以内**
-
-### FC 成本预估
-
-| 配置 | 单价 | 月调用量 | 月成本 |
-|------|------|---------|--------|
-| 512MB / 0.5vCPU | ~0.00006元/次 | 10万次 | ~6元 |
-| 512MB / 0.5vCPU | ~0.00006元/次 | 100万次 | ~60元 |
-
----
-
-## 作为 DeepSeek 工具注册
-
-将以下配置加入 DeepSeek 的 Function Calling / Tool Use 定义：
-
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "query_concept_blocks",
-    "description": "查询A股个股所属的概念板块、行业分类和地域归属",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "code": {
-          "type": "string",
-          "description": "6位股票代码，如 688017"
-        }
-      },
-      "required": ["code"]
+    location / {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 120s;
     }
-  }
 }
 ```
 
-> 完整的三个工具定义见 `openapi.yaml`，可直接转换为 OpenAI/DeepSeek tool schema。
+启用并申请 SSL：
+```bash
+ln -s /etc/nginx/sites-available/a-stock-api /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+certbot --nginx -d api.yourdomain.com
+```
+
+### 8. 阿里云安全组放行
+
+登录阿里云控制台 → ECS → 安全组 → 添加规则：
+- 端口：9000（或 80/443 如果用了 Nginx）
+- 授权对象：0.0.0.0/0
+
+### 9. Dify 接入
+
+Dify 工具配置中，将 API endpoint 指向：
+```
+http://<ECS公网IP>:9000/api/v1/stock/...
+```
+或如果配置了域名：
+```
+https://api.yourdomain.com/api/v1/stock/...
+```
+
+### 常用运维命令
+
+```bash
+systemctl status a-stock-api     # 查看状态
+systemctl restart a-stock-api    # 重启
+journalctl -u a-stock-api -f     # 实时日志
+tail -f /var/log/a-stock-api.log # 访问日志
+```
+
+### ECS 成本参考
+
+| 配置 | 月费 | 够用吗 |
+|------|------|--------|
+| 1C1G (ecs.t6) | ~30元 | 够，QPS<10 |
+| 1C2G (ecs.s6) | ~60元 | 充裕 |
+| 2C4G | ~150元 | 绰绰有余 |
+
+---
+
+## 方案 B：阿里云 FC（需额度，暂不可用）
+
+> 你的 FC 额度已用完，跳过此方案。恢复后可继续使用 `s deploy` 一键部署。
 
 ---
 
@@ -181,6 +169,5 @@ vars:
 cd api_wrapper
 pip install -r requirements.txt
 python app.py
+# 访问 http://localhost:9000/api/v1/health
 ```
-
-访问 `http://localhost:9000/api/v1/health` 确认正常运行。
