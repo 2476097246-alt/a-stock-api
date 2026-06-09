@@ -8,7 +8,7 @@ import threading
 from flask import Flask, request, jsonify
 
 from stock_core import (
-    baidu_concept_blocks,
+    eastmoney_concept_blocks,
     eastmoney_stock_info,
     eastmoney_fund_flow_minute,
     stock_fund_flow_120d,
@@ -131,7 +131,7 @@ def api_dragon_tiger():
 
 
 # ============================================================================
-# Route 2: Concept Blocks (Baidu -> Eastmoney fallback)
+# Route 2: Concept Blocks (东财 slist，V3.2.2 #18)
 # ============================================================================
 
 @app.route("/api/v1/stock/concept", methods=["GET"])
@@ -140,20 +140,27 @@ def api_concept():
         code = request.args.get("code", "").strip()
         if not code or len(code) != 6 or not code.isdigit():
             return _err("参数 code 必须为6位数字股票代码")
-        result = baidu_concept_blocks(code)
-        return _ok(result)
+        _track_em_call()
+        result = eastmoney_concept_blocks(code)
+        if result.get("total", 0) > 0:
+            return _ok(result)
+        raise RuntimeError("东财 slist 返回空")
     except Exception as e:
         print(f"[WARN] Concept: {e}")
         try:
             _track_em_call()
             info = eastmoney_stock_info(code)
             if info and info.get("industry"):
-                return _ok({"industry": [{"name": info["industry"], "change_pct": "", "desc": ""}],
-                            "concept": [], "region": [], "concept_tags": [info["industry"]]})
+                industry = info["industry"]
+                return _ok({
+                    "total": 1,
+                    "boards": [{"name": industry, "code": "", "change_pct": "", "lead_stock": ""}],
+                    "concept_tags": [industry],
+                    "note": "仅返回行业信息（板块归属接口受限）",
+                })
         except Exception:
             pass
-        return _ok({"industry": [], "concept": [], "region": [], "concept_tags": [],
-                     "note": "数据源受限"})
+        return _ok({"total": 0, "boards": [], "concept_tags": [], "note": "数据源受限"})
 
 
 # ============================================================================

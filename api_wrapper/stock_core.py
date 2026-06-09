@@ -43,16 +43,6 @@ _em_last_call = [0.0]          # 模块级上次请求时间戳
 
 DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 
-# 百度股市通 PAE 请求头
-_BAIDU_PAE_HEADERS = {
-    "Host": "finance.pae.baidu.com",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/117.0.0.0",
-    "Accept": "application/vnd.finance-web.v1+json",
-    "Origin": "https://gushitong.baidu.com",
-    "Referer": "https://gushitong.baidu.com/",
-}
-
-
 # ============================================================================
 # 东财统一请求入口（防封）
 # ============================================================================
@@ -87,53 +77,62 @@ def eastmoney_datacenter(report_name: str, columns: str = "ALL",
 
 
 # ============================================================================
-# 1. 概念板块归属（百度股市通）
+# 1. 概念板块归属（东财 slist，V3.2.2 替换百度 PAE #18）
 # ============================================================================
+
+def eastmoney_concept_blocks(code: str) -> dict:
+    """
+    个股所属板块/概念归属（东财 slist，一次请求拿全，已内置限流）。
+    返回: {total, boards: [{name, code(BK码), change_pct, lead_stock}], concept_tags: [板块名...]}
+    boards 混合 行业/概念/地域，板块名自解释；concept_tags 是所有板块名的便捷列表。
+    """
+    market_code = 1 if code.startswith("6") else 0
+    params = {
+        "fltt": "2", "invt": "2",
+        "secid": f"{market_code}.{code}",
+        "spt": "3", "pi": "0", "pz": "200", "po": "1",
+        "fields": "f12,f14,f3,f128",
+    }
+    headers = {"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"}
+    try:
+        r = em_get("https://push2.eastmoney.com/api/qt/slist/get",
+                   params=params, headers=headers, timeout=15)
+        d = r.json()
+    except Exception as e:
+        print(f"[WARN] 东财板块归属请求失败: {e}")
+        return {"total": 0, "boards": [], "concept_tags": []}
+
+    diff = (d.get("data") or {}).get("diff") or {}
+    items = diff.values() if isinstance(diff, dict) else diff
+    boards = []
+    for it in items:
+        boards.append({
+            "name": it.get("f14", ""),
+            "code": it.get("f12", ""),
+            "change_pct": it.get("f3", ""),
+            "lead_stock": it.get("f128", ""),
+        })
+    return {
+        "total": len(boards),
+        "boards": boards,
+        "concept_tags": [b["name"] for b in boards],
+    }
+
 
 def baidu_concept_blocks(code: str) -> dict:
-    """
-    百度股市通概念板块归属。
-    返回: {industry: [...], concept: [...], region: [...], concept_tags: [...]}
-    """
-    url = (
-        f"https://finance.pae.baidu.com/api/getrelatedblock"
-        f"?code={code}&market=ab"
-        f"&typeCode=all&finClientType=pc"
-    )
-    r = requests.get(url, headers=_BAIDU_PAE_HEADERS, timeout=10)
-    d = r.json()
-    if str(d.get("ResultCode", -1)) != "0":
-        raise RuntimeError(f"百度PAE错误: {d}")
-
-    result = {"industry": [], "concept": [], "region": [], "concept_tags": []}
-    for block in d.get("Result", []):
-        block_type = block.get("type", "")
-        for item in block.get("list", []):
-            entry = {
-                "name": item.get("name", ""),
-                "change_pct": item.get("increase", ""),
-                "desc": item.get("desc", ""),
-            }
-            if "行业" in block_type:
-                result["industry"].append(entry)
-            elif "概念" in block_type:
-                result["concept"].append(entry)
-                result["concept_tags"].append(entry["name"])
-            elif "地域" in block_type:
-                result["region"].append(entry)
-    return result
-
+    """已弃用（百度 PAE #18 失效），保留别名指向东财 slist。"""
+    return eastmoney_concept_blocks(code)
 
 
 # ============================================================================
-# 1b. ?????????? push2 ? ?????????
+# 1b. 东财个股基础信息（push2，概念板块降级兜底）
 # ============================================================================
 
 def eastmoney_stock_info(code: str) -> dict:
     """
-    ???????? push2??
-    ??: {code, name, industry}  ?  {}
-    ???????????????????
+    东财个股基础信息（push2）。
+    返回: {code, name, industry} 或 {}
+    仅作概念板块接口失败时的降级兜底。
     """
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -411,17 +410,17 @@ def industry_comparison(top_n: int = 20) -> dict:
 
 
 # ============================================================================
-# 7. ?????????????IP ? ???????2?
+# 7. 腾讯财经实时行情（不封 IP）
 # ============================================================================
 
 def tencent_quote(codes: list[str]) -> dict:
     """
-    ???????????? ? PE/PB/??/???/???? ?????
+    腾讯财经实时行情 — PE/PB/市值/换手率/涨跌停价等。
     codes: ["688017", "300476", "002463"]
-    ?????: ["000001", "000300", "399006"]
-    ???ETF: ["510050", "510300"]
-    ??: {code: {name, price, pe_ttm, pb, mcap_yi, float_mcap_yi, ...}}
-    ??: GBK
+    也支持指数: ["000001", "000300", "399006"]
+    也支持ETF: ["510050", "510300"]
+    返回: {code: {name, price, pe_ttm, pb, mcap_yi, float_mcap_yi, ...}}
+    编码: GBK
     """
     prefixed = []
     for c in codes:
@@ -471,15 +470,15 @@ def tencent_quote(codes: list[str]) -> dict:
 
 
 # ============================================================================
-# 8. ?????K???? MA5/MA10/MA20?
+# 8. 百度K线（带 MA5/MA10/MA20）
 # ============================================================================
 
 def baidu_kline_with_ma(code: str, start_time: str = "") -> dict:
     """
-    ?????K? ? ????: ????? ma5/ma10/ma20 ???
-    code: 6?????
-    start_time: ??????=?????? "2026-01-01"
-    ??: {keys: [...], rows: [...]}
+    百度股市通日K线，返回时已含 ma5/ma10/ma20 均价。
+    code: 6位股票代码
+    start_time: 起始日期，空=全部历史，如 "2026-01-01"
+    返回: {keys: [...], rows: [...]}
     """
     url = "https://finance.pae.baidu.com/selfselect/getstockquotation"
     params = {
@@ -504,15 +503,15 @@ def baidu_kline_with_ma(code: str, start_time: str = "") -> dict:
 
 
 # ============================================================================
-# 9. ???????????????73ms?
+# 9. 同花顺热点归因（零鉴权，约 73ms）
 # ============================================================================
 
 def ths_hot_reason(date: str = None) -> list[dict]:
     """
-    ?????????? ? ?????????? reason?
-    date: "YYYY-MM-DD" ???None=??
-    ??: [{name, code, reason, close, change_pct, turnover_pct, amount, volume, dde_net, market}, ...]
-    ??: 73ms ?? ~125 ?
+    当日强势股 + 题材归因 reason 标签。
+    date: "YYYY-MM-DD"，None=今天
+    返回: [{name, code, reason, close, change_pct, turnover_pct, amount, volume, dde_net, market}, ...]
+    耗时: 73ms，约 ~125 只
     """
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -530,7 +529,7 @@ def ths_hot_reason(date: str = None) -> list[dict]:
     r = requests.get(url, headers=headers, timeout=10)
     data = r.json()
     if data.get("errocode", 0) != 0:
-        raise RuntimeError(f"???????: {data.get('errormsg', '')}")
+        raise RuntimeError(f"同花顺热点错误: {data.get('errormsg', '')}")
 
     rows = data.get("data") or []
     result = []
@@ -551,7 +550,7 @@ def ths_hot_reason(date: str = None) -> list[dict]:
 
 
 # ============================================================================
-# 10. ??????????
+# 10. 北向资金实时流向
 # ============================================================================
 
 _HSGT_HEADERS = {
@@ -566,9 +565,9 @@ _HSGT_HEADERS = {
 
 def hsgt_realtime() -> dict:
     """
-    ?????????????????? 09:10-15:00?262 ??????
-    ??: {records: [{time, hgt_yi, sgt_yi}, ...], summary: {hgt_yi, sgt_yi, total_yi}}
-    ??: ??
+    北向资金实时分钟流向，09:10-15:00，262 个时间点。
+    返回: {records: [{time, hgt_yi, sgt_yi}, ...], summary: {hgt_yi, sgt_yi, total_yi}}
+    单位: 亿元
     """
     url = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
     r = requests.get(url, headers=_HSGT_HEADERS, timeout=10)
@@ -906,14 +905,33 @@ def _cninfo_ts_to_date(ts):
     return str(ts)[:10] if ts else ''
 
 
+_CNINFO_ORGID_MAP = {}
+
+
+def _cninfo_orgid(code: str) -> str:
+    """查股票真实 orgId（#19 修复）。优先动态查官方映射表，查不到再回退硬编码。"""
+    global _CNINFO_ORGID_MAP
+    if not _CNINFO_ORGID_MAP:
+        try:
+            r = requests.get("http://www.cninfo.com.cn/new/data/szse_stock.json",
+                             headers={"User-Agent": UA}, timeout=15)
+            _CNINFO_ORGID_MAP = {s["code"]: s["orgId"]
+                                 for s in r.json().get("stockList", [])}
+        except Exception as e:
+            print(f"[WARN] 巨潮 orgId 映射表拉取失败，回退硬编码规则: {e}")
+    org = _CNINFO_ORGID_MAP.get(code)
+    if org:
+        return org
+    if code.startswith("6"):
+        return f"gssh0{code}"
+    elif code.startswith(("8", "4")):
+        return f"gsbj0{code}"
+    return f"gssz0{code}"
+
+
 def cninfo_announcements(code: str, page_size: int = 30) -> list[dict]:
     url = 'https://www.cninfo.com.cn/new/hisAnnouncement/query'
-    if code.startswith('6'):
-        org_id = f'gssh0{code}'
-    elif code.startswith(('8', '4')):
-        org_id = f'gsbj0{code}'
-    else:
-        org_id = f'gssz0{code}'
+    org_id = _cninfo_orgid(code)
     payload = {
         'stock': f'{code},{org_id}',
         'tabName': 'fulltext',

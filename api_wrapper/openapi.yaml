@@ -106,11 +106,11 @@ paths:
     get:
       tags: [Signal]
       operationId: getConcept
-      summary: 概念板块归属（百度→东财降级）
+      summary: 概念板块归属（东财 slist，V3.2.2）
       description: |
-        个股所属行业/概念/地域分类。
-        industry: 申万行业分类 | concept: 概念板块 | region: 地域 | concept_tags: 纯名称数组
-        百度被封时自动降级到东财行业分类，再失败返回空盒（不抛500）。
+        个股所属全部板块（行业/概念/地域混合），一次请求拿全。
+        返回 total、boards（含 name/BK码/涨跌幅/龙头股）、concept_tags。
+        接口受限时降级为仅行业信息，再失败返回空盒（不抛500）。
       parameters:
         - name: code
           in: query
